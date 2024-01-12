@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +16,7 @@
 import argparse
 import csv
 from pathlib import Path
-
+import pdb
 import numpy as np
 import torch
 from utils import (DEFAULT_HF_MODEL_DIRS, DEFAULT_PROMPT_TEMPLATES,
@@ -25,6 +25,8 @@ from utils import (DEFAULT_HF_MODEL_DIRS, DEFAULT_PROMPT_TEMPLATES,
 import tensorrt_llm
 from tensorrt_llm.logger import logger
 from tensorrt_llm.runtime import PYTHON_BINDINGS, ModelRunner
+import random
+import string
 
 if PYTHON_BINDINGS:
     from tensorrt_llm.runtime import ModelRunnerCpp
@@ -151,6 +153,11 @@ def parse_arguments(args=None):
 
     return parser.parse_args(args=args)
 
+def generate_random_string(length):
+    characters = string.ascii_letters + string.digits + string.punctuation
+    random_string = ''.join(random.choices(characters, k=length))
+    
+    return random_string
 
 def parse_input(tokenizer,
                 input_text=None,
@@ -229,6 +236,7 @@ def print_output(tokenizer,
     batch_size, num_beams, _ = output_ids.size()
     if output_csv is None and output_npy is None:
         for batch_idx in range(batch_size):
+            print("--------------- index: ", batch_idx, "--------------------")
             inputs = output_ids[batch_idx][0][:input_lengths[batch_idx]].tolist(
             )
             input_text = tokenizer.decode(inputs)
@@ -267,9 +275,9 @@ def print_output(tokenizer,
         vocab_size_padded = context_logits.shape[-1]
         context_logits = context_logits.reshape([1, -1, vocab_size_padded])
         contex_last_token_logits = torch.index_select(context_logits, 1,
-                                                      last_token_ids - 1).view(
-                                                          batch_size, 1,
-                                                          vocab_size_padded)
+                                            last_token_ids - 1).view(
+                                                batch_size, 1,
+                                                vocab_size_padded)
         generation_logits = torch.cat(
             [contex_last_token_logits, generation_logits], axis=1)
         generation_logits = generation_logits.reshape(
@@ -322,8 +330,16 @@ def main(args):
     prompt_template = None
     if args.use_prompt_template and model_name in DEFAULT_PROMPT_TEMPLATES:
         prompt_template = DEFAULT_PROMPT_TEMPLATES[model_name]
+    
+    batch = 64
+    input_seq_len = 512
+    prompts = []
+    for _ in range(batch):
+        prompt = generate_random_string(input_seq_len)
+        prompts.append(prompt)
+
     batch_input_ids = parse_input(tokenizer=tokenizer,
-                                  input_text=args.input_text,
+                                  input_text=prompts,
                                   prompt_template=prompt_template,
                                   input_file=args.input_file,
                                   add_special_tokens=args.add_special_tokens,
@@ -332,7 +348,7 @@ def main(args):
                                   num_prepend_vtokens=args.num_prepend_vtokens,
                                   model_name=model_name)
     input_lengths = [x.size(0) for x in batch_input_ids]
-
+    
     if not PYTHON_BINDINGS and not args.use_py_session:
         logger.warning(
             "Python bindings of C++ session is unavailable, fallback to Python session."
@@ -359,9 +375,10 @@ def main(args):
             sink_token_length=args.sink_token_length,
         )
     runner = runner_cls.from_dir(**runner_kwargs)
-
+    
     with torch.no_grad():
-        outputs = runner.generate(
+
+        outputs, time = runner.generate(
             batch_input_ids,
             max_new_tokens=args.max_output_len,
             max_attention_window_size=args.max_attention_window_size,
@@ -386,18 +403,19 @@ def main(args):
             return_dict=True)
         torch.cuda.synchronize()
 
-    if args.streaming:
-        for curr_outputs in throttle_generator(outputs,
-                                               args.streaming_interval):
-            if runtime_rank == 0:
-                output_ids = curr_outputs['output_ids']
-                sequence_lengths = curr_outputs['sequence_lengths']
-                print_output(tokenizer,
-                             output_ids,
-                             input_lengths,
-                             sequence_lengths,
-                             output_csv=args.output_csv,
-                             output_npy=args.output_npy)
+    if runtime_rank == 0:
+        if args.streaming:
+            for curr_outputs in throttle_generator(outputs,
+                                                   args.streaming_interval):
+                if runtime_rank == 0:
+                    output_ids = curr_outputs['output_ids']
+                    sequence_lengths = curr_outputs['sequence_lengths']
+                    print_output(tokenizer,
+                                output_ids,
+                                input_lengths,
+                                sequence_lengths,
+                                output_csv=args.output_csv,
+                                output_npy=args.output_npy)
     else:
         if runtime_rank == 0:
             output_ids = outputs['output_ids']
@@ -416,6 +434,7 @@ def main(args):
                          context_logits=context_logits,
                          generation_logits=generation_logits,
                          output_logits_npy=args.output_logits_npy)
+    print("time:", time * 1000, "ms")
 
 
 if __name__ == '__main__':

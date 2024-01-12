@@ -560,21 +560,58 @@ class ModelRunner(ModelRunnerMixin):
         ptuning_kwargs = self._prepare_ptuning(prompt_table_path, prompt_tasks,
                                                batch_size)
         outputs = self.session.decode(
-            batch_input_ids,
-            input_lengths,
-            sampling_config,
-            stop_words_list=sampling_config.stop_words_list,
-            bad_words_list=sampling_config.bad_words_list,
-            output_sequence_lengths=sampling_config.output_sequence_lengths,
-            return_dict=sampling_config.return_dict,
-            streaming=streaming,
-            stopping_criteria=stopping_criteria,
-            logits_processor=logits_processor,
-            **ptuning_kwargs)
+                    batch_input_ids,
+                    input_lengths,
+                    sampling_config,
+                    stop_words_list=sampling_config.stop_words_list,
+                    bad_words_list=sampling_config.bad_words_list,
+                    output_sequence_lengths=sampling_config.output_sequence_lengths,
+                    return_dict=sampling_config.return_dict,
+                    streaming=streaming,
+                    stopping_criteria=stopping_criteria,
+                    logits_processor=logits_processor,
+                    **ptuning_kwargs)
+        warmup = 5
+        for _ in range(warmup):
+            outputs = self.session.decode(
+                    batch_input_ids,
+                    input_lengths,
+                    sampling_config,
+                    stop_words_list=sampling_config.stop_words_list,
+                    bad_words_list=sampling_config.bad_words_list,
+                    output_sequence_lengths=sampling_config.output_sequence_lengths,
+                    return_dict=sampling_config.return_dict,
+                    streaming=streaming,
+                    stopping_criteria=stopping_criteria,
+                    logits_processor=logits_processor,
+                    **ptuning_kwargs)
+        iter = 10
+        torch.cuda.synchronize()
+        profiler.start("OPT")
+        import time
+        start = time.time()
+        for _ in range(iter):
+            outputs = self.session.decode(
+                    batch_input_ids,
+                    input_lengths,
+                    sampling_config,
+                    stop_words_list=sampling_config.stop_words_list,
+                    bad_words_list=sampling_config.bad_words_list,
+                    output_sequence_lengths=sampling_config.output_sequence_lengths,
+                    return_dict=sampling_config.return_dict,
+                    streaming=streaming,
+                    stopping_criteria=stopping_criteria,
+                    logits_processor=logits_processor,
+                    **ptuning_kwargs)
+        profiler.stop("OPT")
+        torch.cuda.synchronize()
+        # time = profiler.elapsed_time_in_sec("OPT") / iter
+        total_time = (time.time() - start) / iter
         if sampling_config.return_dict:
             if streaming:
                 outputs = (self._prepare_outputs(curr_outputs, input_lengths)
                            for curr_outputs in outputs)
             else:
                 outputs = self._prepare_outputs(outputs, input_lengths)
-        return outputs
+        return outputs, total_time
+        # return outputs
